@@ -1,0 +1,4 @@
+import numpy as np
+
+T = np.eye(3, dtype=np.float32)  # 일단 테스트용
+np.save("T_RI.npy", T)
