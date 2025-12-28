@@ -15,3 +15,12 @@
 3. raw_dump.py : mmWave 로우 데이터 출력 확인 코드
 
 4. sensor_fusion.py : 스티칭된 카메라 영상 + mmWave 로우 데이터 융합 코드
+
+### 최종 코드
+dual_lane_detector.py
+
+### 디스플레이 이미지 예시
+![alt text](<Screenshot from 2025-12-28 20-58-18.png>)
+
+- 좌측 : 1팀(대차 정면 영상 및 위험도 판단 결과)
+- 우측 : 2팀(파손랙 검사 결과 이미지)
