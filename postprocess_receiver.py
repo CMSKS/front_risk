@@ -7,6 +7,8 @@ from typing import Any, Dict, Optional
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
+from sensor_msgs.msg import CompressedImage
+from rclpy.qos import qos_profile_sensor_data
 
 
 def ensure_dir(p: str):
@@ -23,104 +25,217 @@ def status_to_cls(vertical_status: Optional[str]) -> str:
         return "danger"
     if "SAFE" in s:
         return "safe"
-    # "알수없음", "MISS", 기타 예외는 error로 저장
     return "error"
+
+
+def safe_stem_from_image_filename(img_name: Any) -> Optional[str]:
+    if isinstance(img_name, str) and len(img_name) > 0:
+        base = os.path.basename(img_name)
+        stem = os.path.splitext(base)[0]
+        return stem if stem else None
+    return None
+
+
+def ext_from_format(fmt: str) -> str:
+    f = (fmt or "").lower()
+    if "png" in f:
+        return ".png"
+    if "jpg" in f or "jpeg" in f:
+        return ".jpg"
+    if "bmp" in f:
+        return ".bmp"
+    if "webp" in f:
+        return ".webp"
+    # 모르면 jpg로 저장(실제 bytes가 png여도 확장자만 틀릴 수 있음)
+    return ".jpg"
 
 
 class Team2JsonReceiver(Node):
     """
     Subscribes:
       /team2/vertical/result/json (std_msgs/String)
+      /team2/vertical/result/image/compressed (sensor_msgs/CompressedImage)
 
-    Optionally saves JSON files under:
-      <save_root>/{danger,safe,error}/...
-
-    If JSON has:
-      - image_filename: use it to name the json file
-    Else:
-      - fallback to timestamp file name
+    Saves:
+      <save_root_json>/{danger,safe,error}/... .json
+      <save_root_images>/{danger,safe,error}/... .jpg/.png (compressed bytes 그대로 저장)
     """
 
     def __init__(self):
-        super().__init__("team2_output_json_receiver")
+        super().__init__("team2_output_receiver")
 
-        # ---- params
-        self.declare_parameter("save_root", "received_team2_jsons")
-        self.declare_parameter("save_files", True)
+        # ---- params (JSON)
+        self.declare_parameter("save_root_json", "received_team2_jsons")
+        self.declare_parameter("save_json_files", True)
         self.declare_parameter("print_pretty", False)
 
-        self.save_root = self.get_parameter("save_root").get_parameter_value().string_value
-        self.save_files = bool(self.get_parameter("save_files").value)
+        # ---- params (Images)
+        self.declare_parameter("save_root_images", "received_team2_images")
+        self.declare_parameter("save_image_files", True)
+        self.declare_parameter("image_topic", "/team2/vertical/result/image/compressed")
+        self.declare_parameter("show_image", False)  # 필요하면 True로
+        self.declare_parameter("jpeg_quality_note", False)  # 사용 안 함(확인용)
+
+        # ---- common
+        self.classes = ["danger", "safe", "error"]
+
+        self.save_root_json = self.get_parameter("save_root_json").get_parameter_value().string_value
+        self.save_json_files = bool(self.get_parameter("save_json_files").value)
         self.print_pretty = bool(self.get_parameter("print_pretty").value)
 
-        self.classes = ["danger", "safe", "error"]
-        if self.save_files:
-            for c in self.classes:
-                ensure_dir(os.path.join(self.save_root, c))
+        self.save_root_images = self.get_parameter("save_root_images").get_parameter_value().string_value
+        self.save_image_files = bool(self.get_parameter("save_image_files").value)
+        self.image_topic = self.get_parameter("image_topic").get_parameter_value().string_value
+        self.show_image = bool(self.get_parameter("show_image").value)
 
-        # ---- subscriber
-        self.sub = self.create_subscription(
+        if self.save_json_files:
+            for c in self.classes:
+                ensure_dir(os.path.join(self.save_root_json, c))
+
+        if self.save_image_files:
+            for c in self.classes:
+                ensure_dir(os.path.join(self.save_root_images, c))
+
+        # ---- 최근 JSON에서 image stem 힌트 저장 (이미지 파일명 맞추기용)
+        # cls별로 마지막 stem 기억
+        self._last_stem_by_cls: Dict[str, str] = {}
+
+        # ---- subscribers
+        self.sub_json = self.create_subscription(
             String,
             "/team2/vertical/result/json",
-            self.cb,
+            self.cb_json,
             10
         )
 
-        self.count = 0
-        self.get_logger().info(
-            f"Receiver ready.\n"
-            f"Subscribing: /team2/vertical/result/json\n"
-            f"save_files={self.save_files} save_root={self.save_root}"
+        self.sub_img = self.create_subscription(
+            CompressedImage,
+            self.image_topic,
+            self.cb_img,
+            qos_profile_sensor_data
         )
 
-    def cb(self, msg: String):
-        self.count += 1
+        self.count_json = 0
+        self.count_img = 0
 
-        # JSON 파싱
+        self.get_logger().info(
+            "Receiver ready.\n"
+            f" JSON topic: /team2/vertical/result/json\n"
+            f" IMG  topic: {self.image_topic}\n"
+            f" save_json_files={self.save_json_files} save_root_json={self.save_root_json}\n"
+            f" save_image_files={self.save_image_files} save_root_images={self.save_root_images}\n"
+            f" show_image={self.show_image}"
+        )
+
+    # ---------------- JSON callback ----------------
+    def cb_json(self, msg: String):
+        self.count_json += 1
+
         try:
             data: Dict[str, Any] = json.loads(msg.data)
         except Exception as e:
-            self.get_logger().warn(f"[{self.count}] JSON parse failed: {e}")
+            self.get_logger().warn(f"[JSON {self.count_json}] parse failed: {e}")
             return
 
         v_status = data.get("vertical_status")
         cls = status_to_cls(v_status)
 
+        # image stem 힌트 저장
+        stem = safe_stem_from_image_filename(data.get("image_filename"))
+        if stem:
+            self._last_stem_by_cls[cls] = stem
+
         # 로그
         if self.print_pretty:
             pretty = json.dumps(data, ensure_ascii=False, indent=2)
-            self.get_logger().info(f"[{self.count}] cls={cls}\n{pretty}")
+            self.get_logger().info(f"[JSON {self.count_json}] cls={cls}\n{pretty}")
         else:
             self.get_logger().info(
-                f"[{self.count}] cls={cls} status={v_status} "
+                f"[JSON {self.count_json}] cls={cls} status={v_status} "
                 f"dev={data.get('vertical_deviation_deg')} tilt={data.get('vertical_tilt_deg')} "
                 f"img={data.get('image_filename')}"
             )
 
-        # 저장
-        if not self.save_files:
+        if not self.save_json_files:
             return
 
-        # 파일명 결정: image_filename이 있으면 그 stem 사용
-        img_name = data.get("image_filename")
-        if isinstance(img_name, str) and len(img_name) > 0:
-            base = os.path.basename(img_name)
-            stem = os.path.splitext(base)[0]
-            out_name = f"{stem}.json"
-        else:
-            out_name = f"msg_{now_ms()}.json"
+        # 파일명 결정
+        out_name = f"{stem}.json" if stem else f"msg_{now_ms()}.json"
+        out_path = os.path.join(self.save_root_json, cls, out_name)
 
-        out_path = os.path.join(self.save_root, cls, out_name)
-
-        # 같은 이름이 이미 있으면 덮어쓰지 않도록 timestamp suffix
         if os.path.exists(out_path):
-            out_path = os.path.join(self.save_root, cls, f"{os.path.splitext(out_name)[0]}_{now_ms()}.json")
+            out_path = os.path.join(
+                self.save_root_json, cls, f"{os.path.splitext(out_name)[0]}_{now_ms()}.json"
+            )
 
         try:
             with open(out_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            self.get_logger().warn(f"Save failed: {e}")
+            self.get_logger().warn(f"[JSON {self.count_json}] save failed: {e}")
+
+    # ---------------- Image callback ----------------
+    def cb_img(self, msg: CompressedImage):
+        self.count_img += 1
+
+        # class 결정: frame_id 우선, 없으면 error
+        cls = (msg.header.frame_id or "").strip().lower()
+        if cls not in self.classes:
+            cls = "error"
+
+        # 파일명 결정: 최근 json의 stem 힌트가 있으면 사용
+        stem = self._last_stem_by_cls.get(cls)
+        ext = ext_from_format(msg.format)
+        if stem:
+            out_name = f"{stem}{ext}"
+        else:
+            out_name = f"img_{now_ms()}{ext}"
+
+        out_path = os.path.join(self.save_root_images, cls, out_name)
+        if os.path.exists(out_path):
+            out_path = os.path.join(
+                self.save_root_images, cls, f"{os.path.splitext(out_name)[0]}_{now_ms()}{ext}"
+            )
+
+        # 저장: compressed bytes 그대로 파일로 write
+        if self.save_image_files:
+            try:
+                with open(out_path, "wb") as f:
+                    f.write(bytes(msg.data))
+            except Exception as e:
+                self.get_logger().warn(f"[IMG {self.count_img}] save failed: {e}")
+                return
+
+        self.get_logger().info(
+            f"[IMG {self.count_img}] cls={cls} format={msg.format} bytes={len(msg.data)} "
+            f"saved={out_path if self.save_image_files else 'False'}"
+        )
+
+        # (옵션) 화면 표시: OpenCV 필요. 설치 안돼있으면 주석/False 유지.
+        if self.show_image:
+            try:
+                import numpy as np
+                import cv2
+
+                arr = np.frombuffer(msg.data, dtype=np.uint8)
+                img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                if img is None:
+                    self.get_logger().warn(f"[IMG {self.count_img}] cv2.imdecode failed")
+                    return
+                cv2.imshow("team2_image", img)
+                cv2.waitKey(1)
+            except Exception as e:
+                self.get_logger().warn(f"[IMG {self.count_img}] show_image failed: {e}")
+
+    def destroy_node(self):
+        # 창 닫기
+        try:
+            if self.show_image:
+                import cv2
+                cv2.destroyAllWindows()
+        except Exception:
+            pass
+        super().destroy_node()
 
 
 def main():
