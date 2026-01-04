@@ -24,3 +24,20 @@ dual_lane_detector.py
 
 - 좌측 : 1팀(대차 정면 영상 및 위험도 판단 결과)
 - 우측 : 2팀(파손랙 검사 결과 이미지)
+
+### 진행 상황
+1. 2팀 정보를 통신(postprocess_receiver.py)으로 받아 디스플레이에 1팀 정보와 함께 띄우는 것까지 구현(dual_lane_detector.py)
+2. 실행 자동화 구현 필요
+    - 첫번째 터미널(ros2실행) 
+        - pkill -f zenoh
+        - cd ~ 
+        - source /opt/ros/jazzy/setup.bash 
+        - zenoh-bridge-ros2dds -e tcp/192.168.0.12:7447 
+
+    - 두번째 터미널(통신 코드 실행) 
+        - cd ~ 
+        - python3 postprocess_receiver.py
+
+    - 세번째 터미널(디스플레이 실행) 
+        - cd ~
+        - python3 dual_lane_detector.py
