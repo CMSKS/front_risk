@@ -41,3 +41,27 @@ dual_lane_detector.py
     - 세번째 터미널(디스플레이 실행) 
         - cd ~
         - python3 dual_lane_detector.py
+
+### 자동화 스크립트 확인
+3) 적용/자동실행 켜기/즉시 실행
+sudo systemctl daemon-reload
+sudo systemctl enable demo-zenoh.service demo-postprocess.service demo-dual-lane.service
+sudo systemctl start demo-zenoh.service demo-postprocess.service demo-dual-lane.service
+
+
+상태 확인
+systemctl status demo-zenoh.service
+systemctl status demo-postprocess.service
+systemctl status demo-dual-lane.service
+
+
+로그 실시간 확인
+journalctl -u demo-zenoh.service -f
+
+4) 재부팅으로 최종 확인
+sudo reboot
+
+아래 명령이 로그인된 상태에서 동작하는지 확인
+
+echo $DISPLAY
+ls -la ~/.Xauthority
